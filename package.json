@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-external/dsh-completion-ledger",
+  "version": "0.0.1",
+  "description": "任务契约与完成核验账本：把用户要求/约束与证据落盘，压缩或恢复会话后自动回注，宣称完成前必须逐条给出证据（dsh-completion-guard 的桌面可用轻量版）",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "files": [
+    "lib",
+    "README.md"
+  ],
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc <2",
+    "@deepseek-ai/schemastery": ">=3.18 <4"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "check": "bash scripts/build.sh"
+  }
+}
