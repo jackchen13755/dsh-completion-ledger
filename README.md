@@ -19,6 +19,22 @@
 3. **完成核验**：宣称「做完了」之前调用 `ledger_check` 逐条对照证据；缺证据就返回 `incomplete`
    与缺口清单，并提醒「有证据但没有任何验证类动作」这类可疑情况。
 
+## 回注消息必须守的宿主契约
+
+回注是一条**真 user 消息**（走 `agent/pre-step` 的 `decision.messages`，与官方
+`@deepseek-ai/dsh-agent` 的 `modelSwitchNotice()` 同一写法），所以必须满足
+`@deepseek-ai/dsh-llm` 的 `MessageSource` 契约：
+
+| 字段 | 要求 | 违反后果 |
+|---|---|---|
+| `source` | 必须存在 | 会话投影层读 `source.kind` 直接崩（`failed to project session …`） |
+| `source.kind` | **生产者自己的名字**（`completion-ledger`）；`kind: 'plugin'` 这类 catch-all 被拒 | v4 会话格式准入抛 `format v4 message requires a producer-owned source kind` |
+| `source.form` | `'notice'` | — |
+| `source.summary` | 必填，且 ≤120 字符（用 `boundContextSummary()` 压） | 超出「一行摘要」的语义约定 |
+
+`reinjectMessage()` 是这条契约的唯一实现点，`scripts/smoke.mjs` 把它钉住（含
+`assertV4RowAdmission` 真准入 + `kind:'plugin'` 反例必须被拒）。
+
 ## 工具
 
 | 工具 | 作用 |
@@ -60,7 +76,8 @@
 所以源码即产物：`lib/index.js`。`scripts/build.sh` 的职责变成交付前自检：
 
 ```sh
-bash scripts/build.sh   # ① 能装载 ② peer 链接就位 ③ 账本目录可写
+bash scripts/build.sh   # ① 自检（装载 + 回注消息契约 + 账本纯函数）② peer 链接 ③ 账本目录可写
+node scripts/smoke.mjs  # 只跑第 ① 项：25 项断言，含宿主 v4 准入与反例
 ```
 
 ## 安装（desktop profile）
@@ -73,4 +90,11 @@ junction + `package.json` 依赖 + profile 的 `cordis.patch.yml`：
       name: '@dsh-external/dsh-completion-ledger'
 ```
 
-peer 需链到宿主同版本：`@deepseek-ai/dsh-tools`（0.1.7-rc.2）与 `@deepseek-ai/schemastery`（3.18.4）。
+peer 需链到宿主同版本（三件，缺任何一个都装载失败——ESM 静态导入会在 fiber 创建前抛出，
+表现为 loader 里的 `[no-fiber]` 且四个工具全部不可见）：
+
+```sh
+ln -s <宿主 node_modules>/@deepseek-ai/dsh-tools      node_modules/@deepseek-ai/dsh-tools
+ln -s <宿主 node_modules>/@deepseek-ai/dsh-llm        node_modules/@deepseek-ai/dsh-llm
+ln -s <宿主 node_modules>/@deepseek-ai/schemastery    node_modules/@deepseek-ai/schemastery
+```

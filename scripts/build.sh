@@ -20,20 +20,12 @@ if [ -z "$NODE" ]; then
 fi
 [ -n "$NODE" ] || { echo "check: 找不到 node（可用 NODE=/path/to/node 指定）" >&2; exit 1; }
 
-echo "=== 1) 装载自检（entry 必须导出 name/apply）==="
-"$NODE" -e "
-import('$ROOT/lib/index.js').then((m) => {
-  const need = ['name', 'apply'];
-  const miss = need.filter((k) => typeof m[k] === 'undefined');
-  if (miss.length) { console.error('  ✗ 缺导出:', miss.join(', ')); process.exit(1); }
-  console.log('  ✓ exports:', Object.keys(m).join(', '));
-  console.log('  ✓ name =', m.name, '| tools =', ['ledger_open','ledger_evidence','ledger_status','ledger_check'].length);
-}).catch((e) => { console.error('  ✗ 装载失败:', e.name, String(e.message).split('\n')[0]); process.exit(1); });
-"
+echo "=== 1) 自检：装载 + 回注消息契约 + 账本纯函数（scripts/smoke.mjs）==="
+"$NODE" "$ROOT/scripts/smoke.mjs"
 
 echo "=== 2) peer 链接 ==="
 missing=0
-for p in "@deepseek-ai/dsh-tools" "@deepseek-ai/schemastery"; do
+for p in "@deepseek-ai/dsh-tools" "@deepseek-ai/dsh-llm" "@deepseek-ai/schemastery"; do
   if [ -e "node_modules/$p/package.json" ]; then
     ver=$("$NODE" -e "console.log(require('$ROOT/node_modules/$p/package.json').version)")
     echo "  ✓ $p@$ver"
