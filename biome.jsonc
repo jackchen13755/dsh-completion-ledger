@@ -1,0 +1,41 @@
+{
+  // 本文件只为把 dsh-lint-loop 点亮：它对本仓库跑的是 `biome check --reporter=json`
+  // （修复走 `biome check --write`）。这里**只开 linter**，格式化与 import 重排保持关闭——
+  // 本仓库的排版（2 空格、单引号、手工 import 顺序）是手写的，
+  // 打开 formatter 会让 check 对每个文件都报"格式差异"，把真正的 lint 信号淹掉。
+  // 想让它同时当格式化器：把下面 formatter.enabled 与 assist.organizeImports 打开，
+  // 再跑一次 `biome check --write`（会产生一次全仓重排的 diff）。
+  "$schema": "https://biomejs.dev/schemas/2.5.14/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": false
+  },
+  "formatter": {
+    "enabled": false
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended"
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "indentStyle": "space",
+      "indentWidth": 2
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  }
+}

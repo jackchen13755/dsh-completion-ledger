@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-completion-ledger",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "任务契约与完成核验账本：把用户要求/约束与证据落盘，压缩或恢复会话后自动回注，宣称完成前必须逐条给出证据（dsh-completion-guard 的桌面可用轻量版）",
   "private": true,
   "type": "module",
@@ -11,13 +11,20 @@
   ],
   "license": "BSD-3-Clause",
   "peerDependencies": {
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc <2",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc <2",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc <2",
     "@deepseek-ai/schemastery": ">=3.18 <4"
   },
   "scripts": {
     "build": "bash scripts/build.sh",
     "check": "bash scripts/build.sh",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "heal": "bash scripts/heal-env.sh",
+    "postinstall": "bash scripts/heal-env.sh"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.14"
   }
 }

@@ -23,14 +23,14 @@ fi
 echo "=== 1) 自检：装载 + 回注消息契约 + 账本纯函数（scripts/smoke.mjs）==="
 "$NODE" "$ROOT/scripts/smoke.mjs"
 
-echo "=== 2) peer 链接 ==="
+echo "=== 2) peer 链接（npm install 会把它们当 extraneous 剪掉，用 scripts/heal-env.sh 自愈）==="
 missing=0
 for p in "@deepseek-ai/dsh-tools" "@deepseek-ai/dsh-llm" "@deepseek-ai/schemastery"; do
   if [ -e "node_modules/$p/package.json" ]; then
     ver=$("$NODE" -e "console.log(require('$ROOT/node_modules/$p/package.json').version)")
     echo "  ✓ $p@$ver"
   else
-    echo "  ✗ 缺 $p（peer 需链到宿主同版本）"; missing=1
+    echo "  ✗ 缺 $p —— 跑 bash scripts/link-peers.sh 链回宿主同实例"; missing=1
   fi
 done
 [ "$missing" = "0" ] || exit 1

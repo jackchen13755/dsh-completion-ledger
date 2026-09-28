@@ -95,7 +95,10 @@ if (fmtPath) {
 console.log('=== 3) 账本纯函数 ===');
 expect(mod.sessionKeyOf('sess/1:2', '/tmp/x') === 'sess_1_2', 'sessionKeyOf 清洗非法字符');
 expect(String(mod.sessionKeyOf(undefined, '/tmp/x')).startsWith('cwd-'), 'sessionKeyOf 无 id 时退化为 cwd 哈希');
-expect(mod.sessionKeyOf(undefined, '/tmp/x') === mod.sessionKeyOf(undefined, '/tmp/x'), 'cwd 哈希稳定');
+const keyOnce = mod.sessionKeyOf(undefined, '/tmp/x');
+const keyAgain = mod.sessionKeyOf(undefined, '/tmp/x');
+expect(keyOnce === keyAgain, 'cwd 哈希在同一进程内稳定（纯函数、无隐藏状态）');
+expect(keyOnce !== mod.sessionKeyOf(undefined, '/tmp/y'), 'cwd 哈希区分不同目录');
 
 const empty = mod.checkLedger(mod.emptyLedger('s', '/tmp'), []);
 expect(empty.verdict === 'empty' && empty.total === 0, `空账本 → verdict=${empty.verdict}`);

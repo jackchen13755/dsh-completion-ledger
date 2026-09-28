@@ -77,7 +77,36 @@
 
 ```sh
 bash scripts/build.sh   # ① 自检（装载 + 回注消息契约 + 账本纯函数）② peer 链接 ③ 账本目录可写
-node scripts/smoke.mjs  # 只跑第 ① 项：25 项断言，含宿主 v4 准入与反例
+node scripts/smoke.mjs  # 只跑第 ① 项：26 项断言，含宿主 v4 准入与反例
+npm run lint            # biome 检查（见下节）
+```
+
+## lint（biome）与 `scripts/heal-env.sh`
+
+本仓库装了 `@biomejs/biome`（devDependency）+ `biome.jsonc`，于是 **dsh-lint-loop 在这个仓库是活的**：
+插件按「仓库本地 `node_modules/.bin` → PATH → 配置里的 `linterPath`」解析命令，所以本地装一份即可。
+
+```sh
+npm run lint       # = biome check .
+npm run lint:fix   # = biome check --write .
+```
+
+`biome.jsonc` **只开 linter、关掉 formatter 与 import 重排**：本仓库的排版是手写的，
+打开 formatter 会让 `check` 对每个文件都报"格式差异"，把真正的 lint 信号淹掉（想改随时可开，见文件内注释）。
+
+两个实测过的环境坑，都在 `scripts/heal-env.sh` 里自愈（挂在 `postinstall` 上，`npm install` 后自动跑）：
+
+| 坑 | 现象 | 自愈做法 |
+|---|---|---|
+| `npm i` 把 peer 当 extraneous 剪掉 | 三条软链没了 → 插件 `[no-fiber]`、四个工具全不可见 | 按「含 `@deepseek-ai/dsh` 的完整安装 → 其余」挑宿主副本重建软链，并用 profile 里的 schemastery 版本交叉核对 |
+| 宿主 PATH 里没有 `node` | linter 起不来：`env: node: No such file or directory`（exit 127）——Biome 官方 `.bin/biome` 是 `#!/usr/bin/env node` 垫片，而 DSH 桌面端由 Finder 启动，PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin` | 把 `node_modules/.bin/biome` 指向 `@biomejs/cli-*/biome` **原生二进制**（`env -i … biome --version` 可用，彻底不依赖 PATH） |
+
+在 DSH 会话里用它的三个工具时**必须显式传 `repoRoot`**（工作区根不是 git 仓库）：
+
+```
+lint_diagnostics { file_path: "lib/index.js", repoRoot: "<本仓库绝对路径>" }
+lint_workspace_errors { repoRoot: "<本仓库绝对路径>" }
+lint_fix { file_path: "…", repoRoot: "<本仓库绝对路径>" }
 ```
 
 ## 安装（desktop profile）
@@ -90,11 +119,9 @@ junction + `package.json` 依赖 + profile 的 `cordis.patch.yml`：
       name: '@dsh-external/dsh-completion-ledger'
 ```
 
-peer 需链到宿主同版本（三件，缺任何一个都装载失败——ESM 静态导入会在 fiber 创建前抛出，
-表现为 loader 里的 `[no-fiber]` 且四个工具全部不可见）：
+peer 需链到宿主同实例（三件，缺任何一个都装载失败——ESM 静态导入会在 fiber 创建前抛出，
+表现为 loader 里的 `[no-fiber]` 且四个工具全部不可见）。**别手工 `ln -s`，用脚本**（它会挑对宿主副本并做版本核对）：
 
 ```sh
-ln -s <宿主 node_modules>/@deepseek-ai/dsh-tools      node_modules/@deepseek-ai/dsh-tools
-ln -s <宿主 node_modules>/@deepseek-ai/dsh-llm        node_modules/@deepseek-ai/dsh-llm
-ln -s <宿主 node_modules>/@deepseek-ai/schemastery    node_modules/@deepseek-ai/schemastery
+bash scripts/heal-env.sh
 ```

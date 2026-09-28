@@ -1,3 +1,7 @@
 node_modules/
 *.tgz
 *.tsbuildinfo
+
+# 本机 npm 走内网镜像，lockfile 会把镜像域名写进 resolved 字段；
+# 本仓库是公开的，所以不提交 lockfile（依赖只有一个 devDependency：@biomejs/biome）。
+package-lock.json
