@@ -28,7 +28,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-PEERS=("@deepseek-ai/dsh-tools" "@deepseek-ai/dsh-llm" "@deepseek-ai/schemastery")
+# dsh-session 是**可选增强**（compat 层用它读 SESSION_FORMAT_VERSION 做版本分支）：
+# 缺了插件照样装载，只是少一条版本日志；链上则优先用宿主导出的版本常量，而不是形态试探。
+PEERS=("@deepseek-ai/dsh-tools" "@deepseek-ai/dsh-llm" "@deepseek-ai/schemastery" "@deepseek-ai/dsh-session")
 STRICT="${DSH_LINK_PEERS_STRICT:-0}"
 ver_of() { node -e "try{console.log(require('$1/package.json').version)}catch(e){console.log('?')}" 2>/dev/null || echo '?'; }
 

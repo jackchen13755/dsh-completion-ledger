@@ -1,0 +1,29 @@
+# dsh-completion-ledger 严格预设（可直接粘进 profile 的 cordis.patch.yml）
+#
+# 与 dsh-doublecheck 的 strict.patch.yml 同一个用法：把「守门的档位」写进配置，
+# 而不是靠每次口头提醒。本预设做两件事：
+#   1. strictEvidence: true —— 自报证据（引用了动作、但会话日志里找不到对应动作）
+#      在 ledger_check 里**直接算缺口**，不再只是告警；
+#   2. reportFile —— 每次核验把交付报告写到会话工作目录，作为可归档的交付物。
+#
+# 用法 A（desktop profile，Electron 独占，推荐）：
+#   在 ~/.dsh/profiles/desktop/cordis.patch.yml 里，把 completion-ledger 那条 insert 改成：
+#
+#     - id: completion-ledger
+#       name: '@dsh-external/dsh-completion-ledger'
+#       config:
+#         strictEvidence: true
+#         reportFile: 'ledger-report.md'
+#         gateOnStop: remind
+#
+# 用法 B（CLI 管理的 profile）：作为后层 patch 叠加，后层覆盖前层。
+#
+# 注意：patch 会**替换该行的整份 config**，Schema 默认值不会重新补齐——
+# 所以只改这两个键时，其余键仍是各自的默认值（本插件所有键都有 default，无需重述）。
+- id: completion-ledger
+  config:
+    strictEvidence: true
+    reportFile: 'ledger-report.md'
+    gateOnStop: remind
+    replayFromSessionLog: true
+    gitEvidence: true
