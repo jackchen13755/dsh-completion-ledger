@@ -14,10 +14,11 @@
  *
  * 用法：node scripts/smoke.mjs        （退出码非 0 即失败）
  */
-import { existsSync, realpathSync, mkdtempSync } from 'node:fs';
+import { existsSync, realpathSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -298,6 +299,121 @@ const replayedEv = await T3.get('ledger_evidence').execute({ item: 'R1', kind: '
 expect(replayedEv.includes('已被观察到的动作支撑'), '只靠会话日志重放，证据也被判定为「有动作支撑」（插件晚装/重启后同样成立）');
 const replayedCheck = await T3.get('ledger_check').execute({ claim: '跑通了' }, { agent: replayedAgent });
 expect(replayedCheck.includes('verdict: complete') && replayedCheck.includes('会话日志重放 1 条'), '核验结论标出事实来自重放');
+
+/* ── 9) 回归：一次外部评审挖出的 7 类缺陷（每条都由断言钉住） ─── */
+
+console.log('=== 9) 评审回归：先前「全绿但不可用」的那几处 ===');
+
+// R1 ledger_status 曾在有账本时必抛 ReferenceError（recent is not defined）
+const statusOut = await T.get('ledger_status').execute({}, exec);
+expect(typeof statusOut === 'string' && statusOut.includes('事实来源'), 'ledger_status 有账本时正常返回（曾抛 ReferenceError）');
+expect(statusOut.includes('事件源') || statusOut.includes('事件源不可用'), 'ledger_status 披露事件源与可用性');
+
+// R2 ok 三态：非 bash 的失败必须被判 false，而不是「没标记就算成功」；没有结果行则 null
+const replayedFail = replay.replayActivity([
+  { type: 'tool/call', seq: 1, time: Date.now() - 2000, data: { callId: 'f1', name: 'edit', arguments: '{"path":"a.js"}' } },
+  { type: 'tool/result', seq: 2, time: Date.now() - 1900, data: { message: { toolCallId: 'f1', content: [{ type: 'text', text: 'Error: [sandbox: file access denied under workspace-write mode]' }] } } },
+  { type: 'tool/call', seq: 3, time: Date.now() - 1000, data: { callId: 'f2', name: 'bash', arguments: '{"command":"true"}' } },
+], { limit: 10 });
+expect(replayedFail[0].ok === false && replayedFail[0].okSource === 'error-text', `非 bash 失败判 false（实际 ok=${replayedFail[0].ok} source=${replayedFail[0].okSource}）`);
+expect(replayedFail[1].ok === null && replayedFail[1].okSource === 'no-result', '没有结果行 → ok=null（无从判定），不再默认 true');
+expect(replay.exitCodeOf('正文提到 [exit code: 0] 这串字\n[exit code: 1]') === 1, '退出码取最后一个标记（避免被正文里的字面量吞掉）');
+expect(replay.looksLikeFailure('Error: the user rejected tool "bash"') === true, '识别「用户拒绝工具」这类失败文本');
+
+// R3 事实不可得 ≠ 没做过：事件源抛错时不得判「疑似自报」，严格模式下也不得降级
+const deadSession = { id: 'dead', header: { cwd: ROOT }, snapshotEvents: () => { throw new Error('boom'); } };
+const deadJudge = mod.matchEvidence({ kind: 'command', ref: 'pytest tests/x.py', at: Date.now() }, [], { factsAvailable: false, factsReason: '事件源抛错' });
+expect(deadJudge.verified === null && deadJudge.reason.includes('事实不可得'), '事实不可得 → verified=null（不能据此认定自报）');
+expect(compat.eventsInfo(deadSession).available === false && compat.eventsInfo({ snapshotEvents: () => [] }).available === true,
+  'eventsInfo 区分「事件源抛错」与「真的是空日志」');
+
+// R4 中文引用是「无法比对」，不是「没做过」
+expect(mod.matchEvidence({ kind: 'command', ref: '人工核对了会话日志重放结果', at: Date.now() }).verified === null, '纯中文引用 → null');
+expect(mod.matchEvidence({ kind: 'command', ref: '', at: Date.now() }).verified === false, '空引用仍然判 false');
+
+// R5 工具**输出文本**里出现同名字符串，不算做了这件事
+const haystackTrap = mod.matchEvidence(
+  { kind: 'command', ref: 'pytest tests/test_api.py', at: Date.now() },
+  [{ at: Date.now() - 500, name: 'bash', detail: 'cat README.md', note: 'README 里提到 pytest tests/test_api.py' }],
+);
+expect(haystackTrap.verified === false, '指纹池只用「工具名+参数」，输出文本不再能伪证');
+
+// R6 文件类证据：客观取证为正即成立（不再被动作比对否掉）；无 cwd / 行号越界各有明确结论
+const tmpRepo = mkdtempSync(join(tmpdir(), 'dsh-ledger-git-'));
+execFileSync('git', ['init', '-q'], { cwd: tmpRepo });
+writeFileSync(join(tmpRepo, 'a.txt'), 'one\ntwo\n');
+execFileSync('git', ['add', 'a.txt'], { cwd: tmpRepo });
+const okFile = await gitmod.fileEvidenceFacts({ cwd: tmpRepo, ref: 'a.txt:2' });
+expect(okFile.ok === true && okFile.exists === true && okFile.tracked === true && okFile.lineInRange === true, '真实文件：存在/被跟踪/行号在范围内');
+const badLine = await gitmod.fileEvidenceFacts({ cwd: tmpRepo, ref: 'a.txt:999' });
+expect(badLine.ok === true && badLine.lineInRange === false && badLine.totalLines === 2, '行号越界被点出（totalLines=2）');
+expect((await gitmod.fileEvidenceFacts({ ref: 'a.txt:1' })).ok === false, '没有会话 cwd → 拒绝取证（不再落到插件进程的 cwd）');
+expect(gitmod.parseFileRef('b.txt:007').line === 7 && gitmod.parseFileRef('b.txt:007').path === 'b.txt', ':007 按前导零解析（曾误判成文件不存在）');
+
+const tmpDir3 = mkdtempSync(join(tmpdir(), 'dsh-ledger-file-'));
+const ctx4 = makeFakeCtx();
+mod.apply(ctx4, { storageDir: tmpDir3 });
+const fileAgent = { session: { id: 'file-1', header: { cwd: tmpRepo }, snapshotEvents: () => [] }, cwd: tmpRepo, inject: () => {} };
+await ctx4._tools.get('ledger_open').execute({ requirements: ['改了 a.txt'] }, { agent: fileAgent });
+const fileEv = await ctx4._tools.get('ledger_evidence').execute({ item: 'R1', kind: 'file', ref: 'a.txt:2' }, { agent: fileAgent });
+expect(fileEv.includes('只读 git 取证') && !fileEv.includes('未观察到支撑动作'), '文件类证据由 git 取证判定成立（曾因没有匹配动作被判「疑似自报」）');
+
+// R7 同一动作不得被重放与落盘各算一次
+const mergedOnce = replay.mergeActivity(
+  [{ callId: 'same', name: 'bash', detail: 'pnpm test', at: 1000, key: 'c:same' }],
+  [{ name: 'bash', detail: 'pnpm test', at: 1001, key: 'c:same' }],
+);
+expect(mergedOnce.length === 1, `同 callId 的重放+落盘只算一条（实际 ${mergedOnce.length}）`);
+
+// R8 git 环境白名单：继承来的 GIT_* 一个都不能漏进去
+const inherited = gitmod.gitEnv({ PATH: '/usr/bin', GIT_LITERAL_PATHSPECS: '1', GIT_CONFIG_GLOBAL: '/tmp/evil', GIT_DIR: '/tmp/x', HOME: '/h' });
+expect(inherited.GIT_LITERAL_PATHSPECS === undefined && inherited.GIT_CONFIG_GLOBAL === '/dev/null' && inherited.GIT_DIR === undefined && inherited.PATH === '/usr/bin',
+  'gitEnv 白名单：只留必要变量，并显式切断用户/系统 git 配置');
+
+// R9 含重命名的 status -z 不再产出幻影条目
+writeFileSync(join(tmpRepo, 'b.txt'), 'x\n');
+execFileSync('git', ['add', 'b.txt'], { cwd: tmpRepo });
+execFileSync('git', ['commit', '-qm', 'init'], { cwd: tmpRepo, env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } });
+execFileSync('git', ['mv', 'a.txt', 'renamed.txt'], { cwd: tmpRepo });
+const gitEvidence = await gitmod.collectGitEvidence({ cwd: tmpRepo });
+const renamed = gitEvidence.changed.sample.join(' | ');
+expect(!/a\. s/.test(renamed), `重命名不再产出幻影条目「a. s」（实际：${renamed}）`);
+expect(/renamed\.txt/.test(renamed), '重命名本身被记录（而不是整条丢失）');
+
+// R10 时间不合法不再打坏比对（NaN 会让条目掉出时间窗、并让去重键互相塌缩）
+expect(replay.finiteTime('2026-09-30T00:00:00Z', 42) === 42 && replay.finiteTime(undefined, 42) === 42 && replay.finiteTime(1234, 0) === 1234,
+  '非法/缺失时间退化为 seq（不再是 NaN 或 Date.now()）');
+
+// R11 同一 callId 的多条结果（compaction/prune 重发副本）不得把失败翻成成功
+const dupResults = replay.replayActivity([
+  { type: 'tool/call', seq: 1, time: Date.now() - 3000, data: { callId: 'd1', name: 'bash', arguments: '{"command":"pnpm test"}' } },
+  { type: 'tool/result', seq: 2, time: Date.now() - 2900, data: { message: { toolCallId: 'd1', content: [{ type: 'text', text: '2 failed\n[exit code: 1]' }] } } },
+  { type: 'tool/result', seq: 9, time: Date.now() - 100, data: { message: { toolCallId: 'd1', content: [{ type: 'text', text: '[... tool result middle pruned ...]' }] } } },
+], { limit: 5 });
+expect(dupResults.length === 1 && dupResults[0].ok === false, `多副本取保守结论（失败不被裁剪副本翻成成功，ok=${dupResults[0].ok}）`);
+
+// R12 callId 缺失不再丢事实（用 seq 兜底），且该事实仍能支撑证据
+const noCallId = replay.replayActivity([
+  { type: 'tool/call', seq: 7, time: Date.now() - 1000, data: { name: 'bash', arguments: '{"command":"node scripts/smoke.mjs"}' } },
+], { limit: 5 });
+expect(noCallId.length === 1 && noCallId[0].callIdMissing === true && noCallId[0].ok === null,
+  'callId 缺失：事实保留（标注 callIdMissing），成败为 null 而不是默认成功');
+expect(mod.matchEvidence({ kind: 'command', ref: 'node scripts/smoke.mjs', at: Date.now() }, noCallId).verified === true,
+  'callId 缺失的事实仍能支撑证据（不再因缺 id 被丢弃）');
+
+// R13 长会话里**早期**挂的证据不得因「最近 N 条」窗口被误判成自报
+const longRows = [{ type: 'tool/call', seq: 1, time: Date.now() - 3600_000, data: { callId: 'early', name: 'bash', arguments: '{"command":"node scripts/smoke.mjs"}' } },
+  { type: 'tool/result', seq: 2, time: Date.now() - 3600_000 + 50, data: { message: { toolCallId: 'early', content: [{ type: 'text', text: 'PASS' }] } } }];
+for (let i = 0; i < 80; i += 1) {
+  longRows.push({ type: 'tool/call', seq: 10 + i * 2, time: Date.now() - 3000 + i, data: { callId: `late${i}`, name: 'bash', arguments: `{"command":"echo ${i}"}` } });
+}
+const tmpDir4 = mkdtempSync(join(tmpdir(), 'dsh-ledger-window-'));
+const ctx5 = makeFakeCtx();
+mod.apply(ctx5, { storageDir: tmpDir4, persistedActivityLimit: 10 });
+const longAgent = { session: { id: 'window-1', header: { cwd: ROOT }, snapshotEvents: () => longRows }, cwd: ROOT, inject: () => {} };
+await ctx5._tools.get('ledger_open').execute({ requirements: ['很早就跑过冒烟'] }, { agent: longAgent });
+const earlyEv = await ctx5._tools.get('ledger_evidence').execute({ item: 'R1', kind: 'command', ref: 'node scripts/smoke.mjs', note: '1 小时前跑的' }, { agent: longAgent });
+expect(earlyEv.includes('已被观察到的动作支撑'), '长会话里早期挂的证据仍被支撑（按证据时间回看，不再被「最近 N 条」窗口误伤）');
 
 /* ── 结论 ──────────────────────────────────────────────────── */
 
