@@ -21,8 +21,11 @@
 4. **证据证伪**（本版新增）：工具活动**带命令原文落盘**；`ledger_evidence` 挂证据时立刻把引用与
    「本会话真实发生过的动作」比对 → 自报证据（写了 `pnpm test` 但其实没跑过）当场标成
    `⚠️ 未观察到支撑动作`；`strictEvidence: true` 时这类条目在核验里**直接算缺口**。
-5. **收尾门禁**（本版新增）：本轮要结束而账本还没收口时注入一条提醒（**只提醒、不阻断**），
-   一轮最多一次；宿主不提供 `agent.inject` 时自动降级为下一次 `pre-step` 补投。
+5. **收尾门禁**（本版新增）：本轮要结束而账本还没收口时，用 `agent.steer()` **把模型拉回一步**
+   继续收口。这里用 `steer()` 而不是 `inject()`：宿主文档把它定为「监听器反对本轮结束」的正规手段，
+   且它会 `wakeDriver`（空闲时也能起一轮）；`inject()` 只往 `inbox.nextStep` 排队、不唤醒，
+   本宿主恰好仍会因此继续本轮，但那是实现细节、不是契约——所以 inject 只作旧宿主兜底。
+   同一轮最多驱动一次；宿主没有 `steer` 时降级为 `inject` 排队，两者都没有则下一次 `pre-step` 补投。
 6. **审计**：`<storageDir>/audit.jsonl` 逐行记录核验结论与门禁触发——用来回答「这插件到底干活了没」。
 7. **事实来自持久会话日志**（本版新增）：把 `tool/call` / `tool/result` 折成活动清单，
    于是**插件晚装、宿主重启、会话分叉**都不会丢事实；核验优先用重放结果，内存观察只作补充。
@@ -63,6 +66,61 @@
   而不是「证据必须为真」——挂一条 `kind: manual` 的自述证据在严格模式下依然算数。
 - `sinceSeq` 传非法值时退化为全量重放（静默）；`git()` 以 reject 表达失败，外部直接 await 需自行 catch。
 
+## 本轮修掉的静默失败（2026-10-29，P0/P1/P2）
+
+这三类失败共同的特征是**全绿但不可用**：断言通过、日志安静、结论却是错的。每条都配了回归断言（`smoke.mjs` 第 9 节）。
+
+| 症状（修前） | 根因 | 现在的行为 |
+|---|---|---|
+| 内存通道的 `detail` **恒为空串** | 读的是 `exec.args` / `exec.input`，而宿主 `ToolExecutionInput` 的字段叫 **`arguments`** | 按 `arguments` 取值，同时产出 `detail`（截 200，展示用）与 `detailFull`（不截断，比对用） |
+| 长复合命令的真证据被判「疑似自报」 | 比对用的是截断后的 `detail`，`detailFull` 白留 | 指纹比对改用 `detailFull`（4000 字符上限，防 write 类工具把字典撑爆）；**平局取时间更晚的那条**（否则「修好后重跑」照做也仍判未支撑） |
+| **跑挂的命令照样能「支撑」证据** | `matchEvidence()` 只看指纹词命中率，从不看活动的 `ok` / `exitCode` | 命中活动 `ok === false` → 判 `false` 并写明「跑过 ≠ 跑通」；`ok === null`（无从判定）维持原判，不误伤旧账本 |
+| 并发时丢证据或丢活动 | `ledger_evidence` 读-改-写跨越 `await` 只读取证，而每次工具调用都会写同一份账本 | 同一 key 的读-改-写走串行队列，`ledger_open` / `ledger_evidence` / 记账三条路径共用一把锁 |
+| 崩溃后**整份账本消失** | 直写终态 + 解析失败被当成「没有账本」，随后被空账本覆盖 | 同目录临时文件 + `rename` 原子写；解析失败与 ENOENT 区分开，损坏件备份成 `<key>.json.corrupt-<ts>` 并告警 |
+| 磁盘满时仍报「✅ 已挂证据」 | `writeLedger` 只 `warn`，返回值被三处调用点忽略 | 写失败冒泡进工具返回：「本条结果**没有落盘**，不要据此宣称完成」，并在 `ledger_status` 里列出来 |
+| 收尾门禁只靠「排一句话」而非驱动 | 用 `agent.inject()`：它只排队、不唤醒，是否继续本轮取决于宿主 loop 的 break 条件（实现细节，非契约） | 改用宿主文档指定的 `agent.steer()`（监听器反对 → machine re-reads inbox → 同一 turn 再跑一步，且会 wakeDriver）；`inject` 只作旧宿主兜底 |
+| 长会话每轮都「检测到会话压缩」 | `compaction/prune` 是工具结果裁剪器**每裁一条**就 append 一次，被当成压缩计数 | 只认 `compaction/start` / `compaction/end` |
+| 重启后恢复会话，账本静默缺席 | 压缩计数基线靠推断，`compaction` 计数为 0 时首轮不注入 | 订阅 `agent/created`，按 `source`（startup / resume / compact）强制回注一次 |
+
+## 独立验收（Oracle，`verify.enabled`）
+
+这块能力是**唯一模型伪造不了**的证据类：命令由插件自己 `execFile` 执行，只认退出码 0。
+
+| 场景 | 行为 |
+|---|---|
+| 模型主动验一次 | `ledger_verify({ item, command: '<id>', commit: true })` → 跑命令、挂客观证据；`commit` 让它登记到条目上 |
+| 到收尾边界 | 条目上登记了 `verify` id 且「最后一次 Oracle 没过」时，插件自己重跑；**不过就 `steer` 把模型拉回一步**，输出按数据回灌；受 `maxSteersPerTurn` 限制 |
+| 命令来源 | 只能引用 `verify.commands` 的 id；`verify.allow` 是**字面量逐行精确匹配**（不是正则）的后备通道，默认空 = 关闭 |
+| 执行预算 | `maxSteersPerTurn` **按轮**计（宿主给了 `turn` 才重置；拿不到轮次时退化为 `maxSteersPerSession` 会话总额） |
+| 失败即缺口 | 最近一次 Oracle 未通过的条目**一律算缺口**（`verdict: incomplete`），与 `strictEvidence` 无关——它是客观事实，不是启发式。修好重跑通过后才恢复 |
+| 证据不会被误杀 | Oracle 证据带 `oracle: true`，核验时**不拿会话活动池去否它**（它不产生 `tool/call` 事件，池子里根本没有它） |
+| 超时 | **按墙钟结算**，不等子进程退出：`pnpm dev &` 这类继承了 stdout 的后台进程不会把轮次挂死 |
+
+三条刻意的取舍：
+
+1. **不抄 `LOOP_DONE` 哨兵**：那会形成第二套完成协议，与 `ledger_check` 互抵消（实测过）。这里只有 `ledger_check` 一个完成后端，Oracle 只负责「把条目变成有证据」。
+2. **不抄人格话术与 iteration 压力阶梯**：`steer` 的文本只讲事实（退出码、输出尾部、修好重跑）。
+3. **`gateOnStop: off` 只关提醒，不关验收驱动**：两件事，提醒是唠叨，Oracle 是「跑一遍再决定能不能收工」；一条验收通过也不等于账本收口，门禁照样会点名还没证据的条目。
+
+### 已知边界（第三轮验收后补充）
+
+- **拿不到宿主 `payload.turn` 时**，「每轮 3 次」会退化成「每会话 3 次」（`verifySteers` 只在轮次变化时重置）。此时靠 `maxSteersPerSession`（默认 20）兜底不死循环，但自动重试上限变小——想再验就手动 `ledger_verify`。
+- **提醒次数是会话级 20 次且不重置**（`remindCount`）：长会话跑满 20 次之后不再提醒收口，这是有意的防刷，要改看 `lib/index.js` 里的上限常量。
+- **`matchEvidence` 仍是「最高命中优先」，只在平局时取更晚那条**：同一条命令原样重跑必定平局、没问题；但如果"重跑时多带了参数"导致旧失败那次命中率更高，仍可能被它拖住——把命令原文写成一致的最可靠。
+
+### 一条必须知道的边界
+
+白名单钉住的是**命令字符串**，钉不住**它执行的代码**：用户在 `verify.commands` 里声明 `pnpm test`，而模型能改 `package.json` 里的 `test` 脚本 —— 那等于能改它执行的代码。这道闸门只挡「模型自拟命令」，挡不住「用户声明的命令所跑的脚本被改」。`verify.enabled` 默认关闭，就是为了让这个权衡由用户显式做出。
+
+## 账本自保护（`tools/pre-execute`）
+
+账本 JSON **不允许被工具改写**——否则「完成核验」可以自己给自己发证据。写入被 `deny` 并写审计（`guard-deny`）。
+
+- **按路径判**：文件类工具解析出写入目标后与账本目录做 `path.relative` 比较，**并 realpath 最近已存在的祖先**（挡相对路径、`..` 穿越、目录/文件符号链接，连"目标还不存在"也挡得住）；shell 类要求出现「改」的动词或 `fs.writeFileSync` 之类的写 API；无害重定向（`2>/dev/null`、`2>&1`）会先剔除，`cat` / `grep` 账本不受影响。
+- **刻意不拦改测试/CI**：改测试在正常开发里是本职（pua 的 integrity-guard 把 `tests` 全列 deny，一开就走不动路）。
+- **它是减速带，不是安全边界**：`run_code` 能算路径、bash 能拼变量、`node -e` 能 `homedir()+'/...'`。真正管用的是「账本由插件自己维护」这个约定 + 核验时重算证据。
+- **只保护账本目录**（不再按 `reportFile` 裸文件名全盘匹配，那会把别的项目里的同名文件一起拦掉）；文本回退只对 shell / `run_code` 生效，且要求路径边界——`completion-ledger-backup/` 这类同族路径、`apply_patch` 补丁正文提到账本路径都不会误拦。
+
 ## 回注消息必须守的宿主契约
 
 回注是一条**真 user 消息**（走 `agent/pre-step` 的 `decision.messages`，与官方
@@ -87,6 +145,7 @@
 | `ledger_evidence` | 给某条挂证据：`kind` = command / test / file / browser / url / manual；返回里会说明这条证据**有没有被观察到的动作支撑** |
 | `ledger_status` | 看全量账本 + 最近工具活动（优先落盘活动，跨重启可核验）+ 上次核验结论 + 疑似自报证据 |
 | `ledger_check` | 完成核验 → `complete` / `incomplete` / `empty`，附缺口、未被支撑的证据与警告；标出事实来源（重放/落盘/内存） |
+| `ledger_verify` | **仅 `verify.enabled=true` 时注册**：由插件自己执行验收命令（只认退出码 0），把结果作为客观证据挂到条目上；不通过就带回输出尾部要求继续修。命令只能引用 `verify.commands` 里声明的 id |
 
 ## 配置（profile patch 里按 id `completion-ledger` 覆盖）
 
@@ -109,6 +168,14 @@
     replayFromSessionLog: true # 从持久会话日志重放工具活动（晚装/重启/分叉后仍可核验）
     gitEvidence: true          # 文件类证据走只读 git 取证（存在性 + 是否被跟踪）
     reportFile: ''             # 非空则每次核验把交付报告写到会话工作目录（如 ledger-report.md）
+    verify:                    # 验收命令（Oracle）：默认全关，不开就不注册第 5 个工具、不跑子进程
+      enabled: false
+      commands: []             # [{ id: 'test', command: 'pnpm test' }] —— 只能引用这里的 id
+      allow: ""                # 字面量命令逐行精确匹配（不是正则），默认空 = 不允许模型自拟命令
+      timeoutMs: 120000
+      tailChars: 2000
+      maxSteersPerTurn: 3      # 同一轮内最多驱动几步
+      maxSteersPerSession: 20  # 会话级总额（宿主不给 turn 时由它兜底）
 ```
 
 一键严格档：仓库里的 [`strict.patch.yml`](./strict.patch.yml)（照 `dsh-doublecheck` 的 strict 预设做法）
@@ -157,8 +224,12 @@
 
 ```sh
 bash scripts/build.sh   # ① 自检（装载 + 回注消息契约 + 账本纯函数）② peer 链接 ③ 账本目录可写
-node scripts/smoke.mjs  # 只跑第 ① 项：64 项断言——宿主 v4 准入与反例、证据证伪、收尾门禁、
-                        # 会话日志重放（含旧形态）、只读 git 取证、交付报告、假 ctx 端到端
+node scripts/smoke.mjs  # 只跑第 ① 项：173 项断言——宿主 v4 准入与反例、证据证伪、收尾门禁、
+                        # 会话日志重放（含旧形态）、只读 git 取证、交付报告、假 ctx 端到端、
+                        # P0/P1/P2 修复回归（字段名 / detailFull / 跑过≠跑通 / 并发不丢 / 损坏可辨 /
+                        # 写失败冒泡 / steer 驱动 / prune 误判 / created 基线）、
+                        # P4 回归（提到≠做过 / 未支撑条目 / cwd 提示 / 账本自保护）、
+                        # P3 回归（Oracle 四种结局 / 白名单 / 预算 / 驱动）
 npm run lint            # biome 检查（见下节）
 ```
 
