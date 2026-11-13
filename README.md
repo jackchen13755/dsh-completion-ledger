@@ -91,6 +91,7 @@
 | 模型主动验一次 | `ledger_verify({ item, command: '<id>', commit: true })` → 跑命令、挂客观证据；`commit` 让它登记到条目上 |
 | 到收尾边界 | 条目上登记了 `verify` id 且「最后一次 Oracle 没过」时，插件自己重跑；**不过就 `steer` 把模型拉回一步**，输出按数据回灌；受 `maxSteersPerTurn` 限制 |
 | 命令来源 | 只能引用 `verify.commands` 的 id；`verify.allow` 是**字面量逐行精确匹配**（不是正则）的后备通道，默认空 = 关闭 |
+| 默认命令 | 条目自身没写 `verify` 时，收尾边界按 `verify.defaultCommands` **逐个跑**（多个 id = 多条就绪目标）。这是**宿主级强制闸门，不依赖模型主动登记**；id 必须在 `commands` 里声明，否则丢弃并 warn 一次 |
 | 执行预算 | `maxSteersPerTurn` **按轮**计（宿主给了 `turn` 才重置；拿不到轮次时退化为 `maxSteersPerSession` 会话总额） |
 | 失败即缺口 | 最近一次 Oracle 未通过的条目**一律算缺口**（`verdict: incomplete`），与 `strictEvidence` 无关——它是客观事实，不是启发式。修好重跑通过后才恢复 |
 | 证据不会被误杀 | Oracle 证据带 `oracle: true`，核验时**不拿会话活动池去否它**（它不产生 `tool/call` 事件，池子里根本没有它） |
@@ -101,6 +102,15 @@
 1. **不抄 `LOOP_DONE` 哨兵**：那会形成第二套完成协议，与 `ledger_check` 互抵消（实测过）。这里只有 `ledger_check` 一个完成后端，Oracle 只负责「把条目变成有证据」。
 2. **不抄人格话术与 iteration 压力阶梯**：`steer` 的文本只讲事实（退出码、输出尾部、修好重跑）。
 3. **`gateOnStop: off` 只关提醒，不关验收驱动**：两件事，提醒是唠叨，Oracle 是「跑一遍再决定能不能收工」；一条验收通过也不等于账本收口，门禁照样会点名还没证据的条目。
+
+### 默认命令：宿主级强制闸门（`verify.defaultCommands`）
+
+条目上的 `verify` 字段要模型**主动登记**才会生效——模型忘了写，那条验收就永远不跑。`defaultCommands` 补的就是这个缺口：
+
+- **套用规则**：条目自身**没有** `verify` 字段时，收尾边界按 `defaultCommands` 里的**每个 id 各跑一次**；条目自己写了 `verify` 就保持原行为（只跑它那一条，不叠加默认命令）。
+- **这是宿主级强制闸门，不依赖模型主动登记**：只要条目还需要验（`needsVerify`）、预算还有、id 在 `commands` 白名单内，插件就自己跑。
+- **白名单仍然管着**：`defaultCommands` 里的 id 必须同时在 `commands` 里声明，未声明的一律丢弃并在装配时 `console.warn` 一次（不让配置写错把整个 verify 链路带崩）。
+- **与 `ledger_verify({ commit: true })` 的关系**：那条路仍然是**模型主动**验一次，并且可以给**单个条目**指定别的命令 id（跑完登记到该条目上）；`defaultCommands` 是**不依赖模型**的兜底层，两者互补，不是二选一。想让某个条目改用别的命令，就在该条目上写 `verify`，主动验一次即可覆盖默认命令。
 
 ### 已知边界（第三轮验收后补充）
 
@@ -171,6 +181,7 @@
     verify:                    # 验收命令（Oracle）：默认全关，不开就不注册第 5 个工具、不跑子进程
       enabled: false
       commands: []             # [{ id: 'test', command: 'pnpm test' }] —— 只能引用这里的 id
+      defaultCommands: []      # 宿主级强制闸门：条目没写 verify 时逐个套用（id 必须在 commands 里，否则丢弃 + warn 一次）
       allow: ""                # 字面量命令逐行精确匹配（不是正则），默认空 = 不允许模型自拟命令
       timeoutMs: 120000
       tailChars: 2000
@@ -224,7 +235,7 @@
 
 ```sh
 bash scripts/build.sh   # ① 自检（装载 + 回注消息契约 + 账本纯函数）② peer 链接 ③ 账本目录可写
-node scripts/smoke.mjs  # 只跑第 ① 项：173 项断言——宿主 v4 准入与反例、证据证伪、收尾门禁、
+node scripts/smoke.mjs  # 只跑第 ① 项：193 项断言——宿主 v4 准入与反例、证据证伪、收尾门禁、
                         # 会话日志重放（含旧形态）、只读 git 取证、交付报告、假 ctx 端到端、
                         # P0/P1/P2 修复回归（字段名 / detailFull / 跑过≠跑通 / 并发不丢 / 损坏可辨 /
                         # 写失败冒泡 / steer 驱动 / prune 误判 / created 基线）、
