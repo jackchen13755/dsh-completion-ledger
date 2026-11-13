@@ -729,6 +729,9 @@ expect(loopMod.needsVerify({ id: 'R1', verify: 't', evidence: [{ oracle: true, v
   'V4 Oracle 通过后不再重跑');
 expect(loopMod.needsVerify({ id: 'R1', evidence: [{ kind: 'manual', verified: null }] }) === false,
   'V4 没声明验收命令的条目不受影响（不误伤纯人工证据）');
+// 有默认命令时，manual 证据不能让条目逃过 Oracle（否则默认闸门可被一条自述证据绕过）
+expect(loopMod.needsVerify({ id: 'R1', evidence: [{ kind: 'manual', verified: null }] }, { hasDefaultCommands: true }) === true,
+  '默认命令存在时，manual 证据不得让条目跳过 Oracle');
 
 // V1 + F1 + F2：轮级预算 / off 只关提醒 / 通过一条不得静音门禁
 const d13 = mkdtempSync(join(tmpdir(), 'dsh-ledger-r12-'));
