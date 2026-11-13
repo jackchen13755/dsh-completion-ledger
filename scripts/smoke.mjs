@@ -939,6 +939,24 @@ const tpMainMention = tp({ items: [p2Item('阶段② 实现：主 agent 自己�
 expect(tpMainMention.missing.length === 0,
   `§5.2④c 主 agent 实现 + 提到专家方案 → 不误判矛盾 → missing=${tpMainMention.missing.map((m) => m.id).join(',') || '（空）'}`);
 
+// ④d 同一轮先后登记两条「阶段②」时，取**最后一条 live**（2026-11-13 回归）
+// 真实事故：早期草案写「由 subagent 直接完成」被读成专家实现 → 永久命中矛盾，
+// 而插件没有改条目文本的 API，收尾门禁被一条废弃措辞卡死十几轮。
+// 草案必须用**能触发矛盾**的措辞（含专家职称）；`subagent` 不在 EXPERT_SUBJECT_RE 里，用它造不出矛盾，
+// 那会让断言恒真、变异检验失效（第一版就踩了这个坑）。
+const tpDraft = p2Item('阶段② 实现：前端开发者专家完成', [{ kind: 'manual', ref: '草案' }]);
+const tpFinal = p2Item('阶段② 实现：主 agent 自己完成，未交专家', [{ kind: 'file', ref: 'lib/a.js' }]);
+// 鉴别力前提：同一句草案**单独存在**时必须判矛盾，否则下面两条「不判矛盾」形同虚设。
+const tpDraftOnly = tp({ items: [tpDraft], activity: [aEdit('lib/a.js')], config: {} });
+expect(tpDraftOnly.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'),
+  `§5.2④d 前置：草案单独存在时必须判矛盾（否则本组断言无鉴别力）→ missing=${tpDraftOnly.missing.map((m) => m.id).join(',') || '（空）'}`);
+const tpOrder1 = tp({ items: [tpDraft, tpFinal], activity: [aEdit('lib/a.js')], config: {} });
+expect(!tpOrder1.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'),
+  `§5.2④d 草案在前、如实声明在后 → 不判矛盾 → missing=${tpOrder1.missing.map((m) => m.id).join(',') || '（空）'}`);
+const tpOrder2 = tp({ items: [tpFinal, tpDraft], activity: [aEdit('lib/a.js')], config: {} });
+expect(!tpOrder2.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'),
+  `§5.2④d 顺序颠倒也不判矛盾（优先选如实声明，与顺序无关）→ missing=${tpOrder2.missing.map((m) => m.id).join(',') || '（空）'}`);
+
 // ⑤ 声明主 agent 实现 + 有 mutation + 单文件 → 不产生 PHASE2-EVIDENCE
 const tpMain1 = tp({ items: [p2Item('阶段② 实现：主 agent 自己写', [{ kind: 'manual', ref: '自述' }])], activity: [aEdit('lib/a.js')], config: {} });
 expect(tpMain1.missing.length === 0 && tpMain1.files === 1,
