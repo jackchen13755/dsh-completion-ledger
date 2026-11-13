@@ -277,8 +277,17 @@ const genv = gitmod.gitEnv({ PATH: '/usr/bin', GIT_DIR: '/tmp/evil', GIT_WORK_TR
 expect(genv.PATH === '/usr/bin' && genv.HOME === '/x' && genv.GIT_DIR === undefined && genv.GIT_WORK_TREE === undefined && genv.GIT_TERMINAL_PROMPT === '0',
   'gitEnv 清空 GIT_* 并禁止交互提问（只读查询不会被重定向到别的仓库）');
 
+// 这条断言要区分两种运行位置，否则装进 node_modules（非 git 工作树）跑 smoke 会假红：
+//  - 源码仓库里：文件必须被 git 跟踪 → tracked === true
+//  - 安装副本里（ROOT 不在任何 git 工作树）：必须如实降级为「不可得」，而不是假装跟踪成功
+const selfRepo = await gitmod.collectGitEvidence({ cwd: ROOT });
 const selfFacts = await gitmod.fileEvidenceFacts({ cwd: ROOT, ref: 'lib/index.js:1' });
-expect(selfFacts.ok === true && selfFacts.exists === true && selfFacts.tracked === true, '本仓库文件：存在且被 git 跟踪（客观事实，非模型自述）');
+if (selfRepo.ok === true) {
+  expect(selfFacts.ok === true && selfFacts.exists === true && selfFacts.tracked === true, '本仓库文件：存在且被 git 跟踪（客观事实，非模型自述）');
+} else {
+  expect(selfFacts.exists === true && selfFacts.tracked === null && typeof selfFacts.gitError === 'string' && selfFacts.gitError !== '',
+    '安装副本（非 git 工作树）：文件存在但跟踪状态如实为 null，不冒充已跟踪');
+}
 const ghost = await gitmod.fileEvidenceFacts({ cwd: ROOT, ref: 'lib/does-not-exist.js:1' });
 expect(ghost.ok === false && ghost.exists === false, '不存在的文件直接判否（引用不存在的东西不能算证据）');
 const outside = await gitmod.collectGitEvidence({ cwd: tmpdir() });
