@@ -117,9 +117,15 @@ expect(mod.effectiveStatus(one.items[0]) === 'evidenced', 'effectiveStatus：有
 const act = (name, detail, verifying) => ({ at: Date.now() - 1000, name, detail, verifying });
 const comp = mod.checkLedger(one, [act('bash', 'bash scripts/smoke.mjs', true)]);
 expect(comp.verdict === 'complete' && comp.warnings.length === 0, `有证据 + 有验证动作 → verdict=${comp.verdict}`);
-const comp2 = mod.checkLedger(one, [act('write', 'lib/index.js', false)]);
+// 这条用例只测「没有验证类动作」这一条告警，与两段式闸门无关 → 用逃生开关把闸门关掉
+// （闸门本身的行为见 §14）。否则它会被 PHASE2 缺口带成 incomplete，测的东西就变了。
+const comp2 = mod.checkLedger(one, [act('write', 'lib/index.js', false)], { twoPhaseGate: false });
 expect(comp2.verdict === 'complete' && comp2.warnings.some((w) => w.includes('没有任何「验证类」动作')),
   '只有写操作时给出「没有验证类动作」告警（同时会点出未被支撑的证据）');
+// 同一输入、闸门打开 → 写了文件却没交代阶段② → 计入缺口（本轮新增的行为）
+const comp2Gate = mod.checkLedger(one, [act('write', 'lib/index.js', false)]);
+expect(comp2Gate.verdict === 'incomplete' && comp2Gate.missingItems.some((i) => i.id === 'PHASE2'),
+  `闸门打开：只有写操作且没交代阶段② → verdict=${comp2Gate.verdict}，缺口含 PHASE2`);
 
 const noteText = mod.renderNote(one, { maxNoteChars: 1800 });
 expect(noteText.includes('[任务契约账本]') && noteText.includes('R1'), 'renderNote 含标题与条目');
@@ -870,6 +876,264 @@ const allowPatchDocs = await pre15({
   agent: agent15,
 }, allow15);
 expect(allowPatchDocs?.kind === 'allow', 'X1 改普通文档的补丁不受影响');
+
+// 启用验收后的正常循环：先失败 → 修好后通过，不该被误标成「证据全未支撑」
+const loopLedger = mod.emptyLedger('s', '/tmp');
+loopLedger.items.push({ id: 'R1', text: '先失败后通过', kind: 'requirement', status: 'open', evidence: [
+  { at: 1, kind: 'command', ref: 'npm test', oracle: true, verified: false, exitCode: 1 },
+  { at: 2, kind: 'command', ref: 'npm test', oracle: true, verified: true, exitCode: 0 },
+] });
+loopLedger.items.push({ id: 'R2', text: '只有失败的验收', kind: 'requirement', status: 'open', evidence: [
+  { at: 1, kind: 'command', ref: 'npm test', oracle: true, verified: false, exitCode: 1 },
+] });
+const loopChk = mod.checkLedger(loopLedger, []);
+expect(!loopChk.unsupportedItems.some((i) => i.id === 'R1'), 'R3-1 先失败后通过 → 不算「证据全未支撑」（否则正常循环被误标）');
+expect(loopChk.unsupportedItems.some((i) => i.id === 'R2'), 'R3-1 只有失败的验收 → 仍算被打回');
+
+/* ── 14) 两段式派生闸门（spec §5 边界用例） ────────────────── */
+
+console.log('=== 14) 两段式派生闸门（阶段① 方案 / 阶段② 实现） ===');
+const gate = await import(pathToFileURL(join(ROOT, 'lib', 'two-phase-gate.js')).href).catch((err) => {
+  bad(`two-phase-gate 装载失败：${String(err?.message).split('\n')[0]}`);
+  return {};
+});
+expect(typeof gate.evaluateTwoPhase === 'function', 'two-phase-gate.js 可外部 require 且导出 evaluateTwoPhase（判定本体不在 index.js 里）');
+const tp = gate.evaluateTwoPhase;
+const aEdit = (p) => ({ at: 1, name: 'edit', detailFull: p, ok: true });
+const aBash = (cmd) => ({ at: 1, name: 'bash', detailFull: cmd, ok: true });
+const p2Item = (text, ev = []) => ({ id: 'P2', text, kind: 'requirement', status: 'open', evidence: ev });
+const onlyOpen = [{ id: 'R1', text: '实现功能', kind: 'requirement', status: 'open', evidence: [] }];
+
+// ① activity 为空数组 → required:false
+const tpEmpty = tp({ items: onlyOpen, activity: [], config: {} });
+expect(tpEmpty.required === false && tpEmpty.mutations === 0, `§5.2① activity=[] → required=${tpEmpty.required} / mutations=${tpEmpty.mutations}`);
+
+// ② 只有 edit 1 次、无 phase2 条目 → missing 含 PHASE2
+const tpOne = tp({ items: onlyOpen, activity: [aEdit('lib/a.js')], config: {} });
+expect(tpOne.required === true && tpOne.missing.some((m) => m.id === 'PHASE2'),
+  `§5.2② 1 次 edit + 无阶段② 条目 → missing=${tpOne.missing.map((m) => m.id).join(',')}`);
+
+// ③ 有 phase2 条目但无证据 → PHASE2
+const tpNoEv = tp({ items: [p2Item('阶段② 实现：主 agent 自己写')], activity: [aEdit('lib/a.js')], config: {} });
+expect(tpNoEv.missing.length === 1 && tpNoEv.missing[0].id === 'PHASE2' && /没有任何证据/.test(tpNoEv.missing[0].reason),
+  `§5.2③ 阶段② 条目无证据 → ${tpNoEv.missing[0].id}（${tpNoEv.missing[0].reason}）`);
+
+// ④ 声明专家实现 + 有 mutation → PHASE2-CONTRADICTION
+const tpContra = tp({ items: [p2Item('阶段② 实现：前端开发者专家完成', [{ kind: 'manual', ref: '专家回稿' }])], activity: [aEdit('lib/a.js')], config: {} });
+expect(tpContra.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'),
+  `§5.2④ 声明专家实现 + 有写入 → missing=${tpContra.missing.map((m) => m.id).join(',')}`);
+
+// ④b 中文职称**不含「专家」二字**时也必须判矛盾（2026-11-11 回归）
+// 本机 Agency 专家的名字是「软件架构师 / 前端开发者 / 工程效率工程师 / 高级开发者」——
+// 既没有「专家」，也没有英文 engineer/architect。只认英文词会让谎报「实现者：前端开发者」直接过关。
+for (const role of ['软件架构师', '前端开发者', '工程效率工程师', '高级开发者']) {
+  const tpCn = tp({ items: [p2Item(`阶段② 实现者：${role}`, [{ kind: 'file', ref: 'lib/a.js' }])], activity: [aEdit('lib/a.js')], config: {} });
+  expect(tpCn.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'),
+    `§5.2④b 声明「${role}」（不含「专家」二字）也要判矛盾 → missing=${tpCn.missing.map((m) => m.id).join(',') || '（空）'}`);
+}
+// ④c 反向：如实声明主 agent 实现 + 顺带提到专家方案来源 → 不算矛盾
+const tpMainMention = tp({ items: [p2Item('阶段② 实现：主 agent 自己写（方案来自软件架构师）', [{ kind: 'file', ref: 'lib/a.js' }])], activity: [aEdit('lib/a.js')], config: {} });
+expect(tpMainMention.missing.length === 0,
+  `§5.2④c 主 agent 实现 + 提到专家方案 → 不误判矛盾 → missing=${tpMainMention.missing.map((m) => m.id).join(',') || '（空）'}`);
+
+// ⑤ 声明主 agent 实现 + 有 mutation + 单文件 → 不产生 PHASE2-EVIDENCE
+const tpMain1 = tp({ items: [p2Item('阶段② 实现：主 agent 自己写', [{ kind: 'manual', ref: '自述' }])], activity: [aEdit('lib/a.js')], config: {} });
+expect(tpMain1.missing.length === 0 && tpMain1.files === 1,
+  `§5.2⑤ 主 agent + 单文件 + 仅 manual → missing=${tpMain1.missing.length} / files=${tpMain1.files}（单文件不强制客观证据）`);
+
+// ⑥ 同上但 ≥2 文件且只有 manual 证据 → PHASE2-EVIDENCE
+const tpMain2 = tp({ items: [p2Item('阶段② 实现：主 agent 自己写', [{ kind: 'manual', ref: '自述' }])], activity: [aEdit('lib/a.js'), aEdit('lib/b.js')], config: {} });
+expect(tpMain2.files === 2 && tpMain2.missing.some((m) => m.id === 'PHASE2-EVIDENCE'),
+  `§5.2⑥ 主 agent + 2 文件 + 仅 manual → missing=${tpMain2.missing.map((m) => m.id).join(',')}`);
+
+// ⑦ config.twoPhaseGate === false → required:false（逃生开关）
+const tpOff = tp({ items: onlyOpen, activity: [aEdit('lib/a.js')], config: { twoPhaseGate: false } });
+expect(tpOff.required === false && tpOff.missing.length === 0, `§5.2⑦ twoPhaseGate=false → required=${tpOff.required}`);
+
+// ⑧ activity 里 name:'bash' 只读（如 grep）→ 不算 mutation
+const tpRead = tp({ items: onlyOpen, activity: [aBash('grep -n "PHASE2" lib/index.js'), aBash('node scripts/smoke.mjs')], config: {} });
+expect(tpRead.required === false && tpRead.mutations === 0, `§5.2⑧ bash 只读（grep / node）→ mutations=${tpRead.mutations}`);
+
+// §3.2 写特征表：**正反成对**逐条钉住。
+// 第 1 轮评审 P2-4 ①：原表 8 条恰好全绕开误判格（没有 `> /dev/null`、`2> file`、`>>`、`| tee`、
+// `biome --write`、`git apply --check`），于是 P1-2 的回归一路绿灯。负例负责「别误判」，
+// 正例负责「别漏判」，缺任何一半都只锁了半扇门。
+const bashCases = [
+  // —— 负例：只读，绝不能算写（旧实现全误判成 mutation）——
+  ['npm test > /dev/null 2>&1', false],
+  ['grep -n foo lib/index.js > /dev/null', false],
+  ['git apply --check /tmp/p.patch', false],
+  ['awk "$1 > 3" data.txt', false],
+  ['node -e "console.log(1 > 0)"', false],
+  ['git status --short', false],
+  [`python3 - <<'PY' print(open('lib/a.js').read()) PY`, false],
+  ['echo hi 2>&1 | tail -3', false],
+  ['cmd > /dev/stdout', false],
+  ['cmd 2> /dev/stderr', false],
+  // —— 正例：真的写（旧实现全漏判成 mutations=0）——
+  ['npm test 2> /tmp/err.log', true],
+  ['echo hi>out.txt', true],
+  ['cmd 1>/tmp/x.log', true],
+  ['cmd >| file.txt', true],
+  ['cmd >> log.txt', true],
+  ['echo x | tee out.txt', true],
+  ['npx biome check --write', true],
+  ['sed -i "s/a/b/" lib/a.js', true],
+  ['git apply /tmp/p.patch', true],
+  ['npx prettier --write lib/a.js', true],
+  ['cp a.js b.js', true],
+  ['mv a.js b.js', true],
+  ['rm -rf dist', true],
+  ['touch out.txt', true],
+  ['truncate -s 0 log.txt', true],
+  [`python3 - <<'PY' open('lib/a.js','w').write('x') PY`, true],
+];
+const bashMiss = bashCases.filter(([cmd, want]) => (tp({ items: onlyOpen, activity: [aBash(cmd)], config: {} }).mutations > 0) !== want);
+expect(bashMiss.length === 0,
+  `§3.2 写特征判定 ${bashCases.length - bashMiss.length}/${bashCases.length}（8 条只读负例 + 16 条写正例）`
+  + (bashMiss.length === 0 ? '' : `；失败：${bashMiss.map(([c, w]) => `${c} 期望${w}`).join(' | ')}`));
+
+// P1-3 写工具覆盖：名单来自 write-signals.js（guard 与 gate 共用一份），
+// 整轮走 run_code 也必须触发闸门——旧实现只认 edit/write，本宿主一等工具 run_code 写满全仓都不介入。
+for (const name of ['edit', 'write', 'str_replace', 'multi_edit', 'apply_patch']) {
+  const r = tp({ items: onlyOpen, activity: [{ at: 1, name, detailFull: 'lib/a.js', ok: true }], config: {} });
+  expect(r.required === true && r.missing.some((m) => m.id === 'PHASE2'), `P1-3 文件类写工具 ${name} → required=${r.required}`);
+}
+for (const name of ['bash', 'pwsh', 'run_code', 'terminal']) {
+  const r = tp({ items: onlyOpen, activity: [{ at: 1, name, detailFull: 'fs.writeFileSync("lib/a.js", "x")', ok: true }], config: {} });
+  expect(r.required === true, `P1-3 shell 类写工具 ${name} 写文件 → required=${r.required}`);
+}
+// 名单一致性：两份判据必须来自同一模块 —— 差集为空（独立命令见交付说明，这里是回归断言）
+const wsMod = await import(pathToFileURL(join(ROOT, 'lib', 'write-signals.js')).href);
+const allWriteNames = ['edit', 'write', 'str_replace', 'multi_edit', 'apply_patch', 'bash', 'pwsh', 'run_code', 'terminal'];
+const guardSide = allWriteNames.filter((n) => wsMod.WRITE_TOOLS.test(n));
+const gateSide = allWriteNames.filter((n) => wsMod.FILE_WRITE_TOOLS.test(n) || wsMod.SHELL_TOOLS.test(n));
+const nameDiff = guardSide.filter((n) => !gateSide.includes(n)).concat(gateSide.filter((n) => !guardSide.includes(n)));
+expect(nameDiff.length === 0 && guardSide.length === allWriteNames.length,
+  `P1-3 写工具名单差集为空（guard ${guardSide.length} 项 / gate ${gateSide.length} 项 / 差集 ${nameDiff.length}）`);
+
+// §3.6 豁免（P1-1）：只降级 PHASE2-EVIDENCE；豁免自身的证据必须 kind !== 'manual'
+const waiveOk = { id: 'W1', text: '豁免：本次只改文档，按豁免放行', kind: 'constraint', status: 'open', evidence: [{ kind: 'file', ref: 'docs/x.md' }] };
+const waiveManual = { id: 'W1', text: '豁免：本次按豁免放行', kind: 'constraint', status: 'open', evidence: [{ kind: 'manual', ref: '' }] };
+const p2MainManual = p2Item('阶段② 实现：主 agent 自己写', [{ kind: 'manual', ref: '自述' }]);
+const tpWaive = tp({ items: [p2MainManual, waiveOk], activity: [aEdit('lib/a.js'), aEdit('lib/b.js')], config: {} });
+expect(tpWaive.waived === true && tpWaive.missing.length === 0 && tpWaive.notes.some((n) => n.id === 'PHASE2-EVIDENCE'),
+  `§3.6 合法豁免（file 证据）→ missing=${tpWaive.missing.length}，notes=${tpWaive.notes.map((n) => n.id).join(',')}（降级而非通过）`);
+// 旧断言把「manual 空 ref 也能豁免」钉成了预期 —— 那正是 spec §1 要堵的最弱证据
+const tpWaiveManual = tp({ items: [p2MainManual, waiveManual], activity: [aEdit('lib/a.js'), aEdit('lib/b.js')], config: {} });
+expect(tpWaiveManual.waived === false && tpWaiveManual.missing.some((m) => m.id === 'PHASE2-EVIDENCE'),
+  `§3.6 豁免证据是 manual 空 ref → 豁免不成立，PHASE2-EVIDENCE 仍在 missing（waived=${tpWaiveManual.waived}）`);
+// PHASE2（完全没有阶段② 声明）是最严重的一格，不可豁免
+const tpWaiveNoDecl = tp({ items: onlyOpen.concat([waiveOk]), activity: [aEdit('lib/a.js')], config: {} });
+expect(tpWaiveNoDecl.missing.some((m) => m.id === 'PHASE2'),
+  `§3.6 豁免不得放行 PHASE2（无声明）→ missing=${tpWaiveNoDecl.missing.map((m) => m.id).join(',')}`);
+const tpWaiveContra = tp({ items: [p2Item('阶段② 实现：安全专家完成', [{ kind: 'manual', ref: '专家回稿' }]), waiveOk], activity: [aEdit('lib/a.js')], config: {} });
+expect(tpWaiveContra.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'), '§3.6 矛盾检测不可豁免（豁免下仍计入缺口）');
+
+// 接入：derived 必须计入 missing 并影响 verdict（不只进 warnings）
+const tpLedger = mod.emptyLedger('s', '/tmp');
+tpLedger.items.push({ id: 'R1', text: '实现两段式闸门', kind: 'requirement', status: 'open', evidence: [{ at: 1, kind: 'manual', ref: '我写完了' }] });
+const editAct = [{ at: 2, name: 'edit', detailFull: 'lib/two-phase-gate.js', ok: true }];
+const tpChk = mod.checkLedger(tpLedger, editAct);
+expect(tpChk.verdict === 'incomplete' && tpChk.derived.some((d) => d.id === 'PHASE2') && tpChk.missingItems.some((m) => m.id === 'PHASE2'),
+  `接入 checkLedger：写入未交代阶段② → verdict=${tpChk.verdict}，derived=${tpChk.derived.map((d) => d.id).join(',')}`);
+const tpChkOff = mod.checkLedger(tpLedger, editAct, { twoPhaseGate: false });
+expect(tpChkOff.verdict === 'complete' && tpChkOff.derived.length === 0, `接入 checkLedger：逃生开关 → verdict=${tpChkOff.verdict}`);
+const tpReport = mod.renderReport(tpLedger, tpChk, { key: 'k', cwd: '/tmp' });
+expect(tpReport.includes('派生闸门') && tpReport.includes('PHASE2'), 'renderReport 单列「派生闸门」一节');
+
+// P2-1 矛盾检测：判据是**实现者主语**，不是全文子串。5 句逐条钉住（3 如实 / 2 谎报）
+for (const t of [
+  '阶段② 实现：由我完成（方案来自软件架构师）',
+  '阶段② 本人完成，参考了 UI 设计师的稿',
+  '阶段② AI 完成，架构建议来自软件架构师',
+]) {
+  const r = tp({ items: [p2Item(t, [{ kind: 'file', ref: 'lib/a.js' }])], activity: [aEdit('lib/a.js')], config: {} });
+  expect(!r.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'), `P2-1 如实声明不判矛盾：${t}`);
+}
+for (const t of [
+  '阶段② 实现：前端开发者完成（主会话只做验收，没写代码）',
+  '阶段② 实现者：安全专家完成，主 agent 只是转述',
+]) {
+  const r = tp({ items: [p2Item(t, [{ kind: 'file', ref: 'lib/a.js' }])], activity: [aEdit('lib/a.js')], config: {} });
+  expect(r.missing.some((m) => m.id === 'PHASE2-CONTRADICTION'), `P2-1 谎报必判矛盾（附一句「主会话」不免罪）：${t}`);
+}
+
+// P2-2 单文件 edit 不得被数成多个文件：detail 落到 JSON.stringify 分支时，
+// old_string / new_string 正文里的路径不是文件名（旧实现单文件算出 4 个）
+const flatDetail = JSON.stringify({ old_string: 'see ./lib/old.js', new_string: 'now lib/index.js:12' });
+const p22 = tp({ items: [p2MainManual], activity: [aEdit(flatDetail)], config: {} });
+expect(p22.files <= 1 && p22.pathsUnknown === true,
+  `P2-2 单文件 edit（正文提到多个路径）→ files=${p22.files} / pathsUnknown=${p22.pathsUnknown}（旧实现 files=4）`);
+expect(!p22.missing.some((m) => m.id === 'PHASE2-EVIDENCE'),
+  `P2-2 文件数无法判断 → 按 spec §3.5 不强制客观证据 → missing=${p22.missing.map((m) => m.id).join(',') || '（空）'}`);
+
+// P2-4 ② 用户可见 Config `twoPhaseForceEvidence` 必须有断言：
+// 旧 smoke 里一次都没出现，把它恒置 false 也不会被抓住。正反成对。
+const tpForce = tp({ items: [p2MainManual], activity: [aEdit('lib/a.js')], config: { twoPhaseForceEvidence: true } });
+expect(tpForce.files === 1 && tpForce.missing.some((m) => m.id === 'PHASE2-EVIDENCE'),
+  `P2-4 twoPhaseForceEvidence:true + 单文件 + 仅 manual → missing=${tpForce.missing.map((m) => m.id).join(',')}`);
+const tpNoForce = tp({ items: [p2MainManual], activity: [aEdit('lib/a.js')], config: {} });
+expect(!tpNoForce.missing.some((m) => m.id === 'PHASE2-EVIDENCE'),
+  'P2-4 同一份输入不开 twoPhaseForceEvidence → 单文件不强制（正反成对，证明开关真的在起作用）');
+
+// P3-1 空账本：跳过派生闸门（旧实现 verdict=empty 与 missing=1 / derived=[PHASE2] 自相矛盾）
+const emptyChk = mod.checkLedger(mod.emptyLedger('s', '/tmp'), [{ at: 1, name: 'edit', detailFull: 'lib/a.js', ok: true }]);
+expect(emptyChk.verdict === 'empty' && emptyChk.missing === 0 && emptyChk.derived.length === 0 && emptyChk.twoPhase.required === false,
+  `P3-1 空账本 + 有写入 → verdict=${emptyChk.verdict} / missing=${emptyChk.missing} / derived=${emptyChk.derived.length}`);
+
+// §5.3 变异测试（P2-4 ③）：**对实现做一次真实改动**（恒假 / 恒真），而不是改输入。
+// 原用例只是把 activity 里的 edit 去掉 —— 那是输入依赖；实现恒真/恒假它照样绿。
+// 做法：把判定本体（two-phase-gate.js + write-signals.js）成对复制到临时目录，只改后者，
+// 并把 gate 副本的相对 import 指向变异副本，于是 evaluateTwoPhase 的返回值就是变异后的结论。
+const wsSrc = fsmod.readFileSync(join(ROOT, 'lib', 'write-signals.js'), 'utf8');
+const gateSrc = fsmod.readFileSync(join(ROOT, 'lib', 'two-phase-gate.js'), 'utf8')
+  .replace("from './write-signals.js'", "from './write-signals.mjs'");
+for (const [idx, [from, to, cmd, wantMutated, label]] of [
+  ['if (redirectTargetsOf(text, opts).length > 0) return true;', 'if (false) return true;', 'echo hi>out.txt', 0, '恒假·重定向判据被短路'],
+  ['if (MUTATE_SHELL.test(text)) return true;', 'if (true) return true;', 'grep -n foo lib/index.js', 1, '恒真·任何 bash 都算写'],
+].entries()) {
+  const real = tp({ items: onlyOpen, activity: [aBash(cmd)], config: {} }).mutations;
+  if (!wsSrc.includes(from)) { bad(`§5.3 变异点未命中：${label}`); continue; }
+  // 每轮必须用**不同的目录**：gate 副本里的 `./write-signals.mjs` 导入没有 query，
+  // 同路径会被 Node 的模块缓存命中，第二轮就还在用第一轮的变异体（实测踩过）。
+  const mutDir = join(ROOT, 'lib', `.mutant-${process.pid}-${idx}`);
+  try {
+    fsmod.mkdirSync(mutDir, { recursive: true });
+    fsmod.writeFileSync(join(mutDir, 'two-phase-gate.mjs'), gateSrc, 'utf8');
+    fsmod.writeFileSync(join(mutDir, 'write-signals.mjs'), wsSrc.replace(from, to), 'utf8');
+    const mut = await import(pathToFileURL(join(mutDir, 'two-phase-gate.mjs')).href);
+    const got = mut.evaluateTwoPhase({ items: onlyOpen, activity: [aBash(cmd)], config: {} }).mutations;
+    expect(real !== wantMutated && got === wantMutated,
+      `§5.3 变异（${label}）被断言杀掉：真实现 mutations=${real} / 变异体 mutations=${got}（${cmd}）`);
+  } finally {
+    try { fsmod.rmSync(mutDir, { recursive: true, force: true }); } catch { /* 清理失败不影响断言结论 */ }
+  }
+}
+
+// P2-3 收尾门禁：条目全有证据、只剩派生缺口时，消息必须单列派生 id 与 reason；
+// 旧实现计数只看 open 条目 →「还有 0 条没有证据（）」空括号，且永远无法靠补证据收口。
+const d17 = mkdtempSync(join(tmpdir(), 'dsh-ledger-p23-'));
+const c17 = makeFakeCtx();
+mod.apply(c17, { storageDir: d17, gateOnStop: 'remind' });
+const s17 = { id: 'p23-1', header: { cwd: tmpCwd }, snapshotEvents: () => [] };
+const steered17 = [];
+const agent17 = { session: s17, cwd: tmpCwd, steer: (m) => steered17.push(m), inject: () => {} };
+const e17 = { agent: agent17 };
+await c17._tools.get('ledger_open').execute({ requirements: ['只剩派生缺口'] }, e17);
+await c17._tools.get('ledger_evidence').execute({ item: 'R1', kind: 'manual', ref: '我读过了' }, e17);
+await c17._hooks.get('tools/post-execute')[0]({ name: 'edit', arguments: { path: join(tmpCwd, 'a.js') }, agent: agent17 }, {}, async () => ({ kind: 'accept' }));
+const chk17 = await c17._tools.get('ledger_check').execute({}, e17);
+expect(chk17.includes('verdict: incomplete') && chk17.includes('PHASE2'),
+  `P2-3 前置：条目全有证据、只剩派生缺口 → verdict=incomplete（${chk17.split('\n')[0]}）`);
+await c17._hooks.get('agent/turn-stopping')[0]({ agent: agent17 });
+// agent.steer() 收到的是 createUserMessage({content:[{type:'text',text}]})，取正文再断言。
+const last17 = steered17.at(-1);
+const msg17 = String(last17?.content?.map((c) => c?.text ?? '').join('\n') ?? '');
+expect(msg17.includes('派生:PHASE2') && !msg17.includes('还有 0 条没有证据（）'),
+  `P2-3 门禁消息计入派生缺口：含「派生:PHASE2」=${msg17.includes('派生:PHASE2')} / 无空括号=${!msg17.includes('还有 0 条没有证据（）')}`);
+expect(/派生:PHASE2 — /.test(msg17),
+  `P2-3 派生缺口单列 reason：${(msg17.split('\n').find((l) => l.includes('派生:PHASE2')) ?? '（未出现）').trim().slice(0, 80)}`);
 
 /* ── 结论 ──────────────────────────────────────────────────── */
 
