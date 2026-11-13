@@ -640,6 +640,73 @@ expect(envNow.PATH === '/bin' && envNow.DEEPSEEK_API_KEY === undefined && envNow
   'P3 Oracle：环境变量白名单（不把 API key 透给验收命令）');
 expect(envNow.PWD === '/tmp/the-cwd', 'P3 Oracle：PWD 改写为真实 cwd（继承来的 PWD 是插件进程的目录，脚本按 $PWD 会跑错）');
 
+/* ── 11b) opts.env：把「这次验收属于哪个会话」透传给命令 ─────────
+ * 验收命令在会话 cwd 下跑，但同一 cwd 可能有多个会话；像 dispatch-check 这种要读
+ * 会话日志的命令必须拿到确定的会话标识。契约：只收 `^[A-Z_][A-Z0-9_]*$` + string 值，
+ * 同名键覆盖白名单，`PWD` 不可覆盖，非法条目忽略且必须**告警**（不能静默吞掉）。
+ * 边界输入逐个喂：undefined / null / 数组 / 字符串 / 空对象 / 非法键名 / 非 string 值 /
+ * 保留键 / 合法值 / 合法 + 非法混在一起。
+ */
+const sanUndef = oracleMod.sanitizeOracleEnv(undefined);
+expect(sanUndef.warnings.length === 0 && Object.keys(sanUndef.accepted).length === 0,
+  'P3b opts.env=undefined → 视为「没传」，不告警（可选参数不惩罚默认路径）');
+const sanNull = oracleMod.sanitizeOracleEnv(null);
+expect(sanNull.warnings.length === 0 && Object.keys(sanNull.accepted).length === 0, 'P3b opts.env=null → 同 undefined');
+const sanArr = oracleMod.sanitizeOracleEnv(['DSH_SESSION_ID=abc']);
+expect(Object.keys(sanArr.accepted).length === 0 && sanArr.warnings.length === 1 && sanArr.warnings[0].includes('数组'),
+  'P3b opts.env 是数组 → 整体忽略并告警（不是把下标当键名塞进子进程）');
+const sanStr = oracleMod.sanitizeOracleEnv('DSH_SESSION_ID=abc');
+expect(Object.keys(sanStr.accepted).length === 0 && sanStr.warnings.length === 1 && sanStr.warnings[0].includes('string'),
+  'P3b opts.env 是字符串 → 整体忽略并告警（不按 `k=v` 猜着拆）');
+const sanEmpty = oracleMod.sanitizeOracleEnv({});
+expect(Object.keys(sanEmpty.accepted).length === 0 && sanEmpty.warnings.length === 0, 'P3b opts.env={} → 合法空对象，不告警');
+const sanBadKey = oracleMod.sanitizeOracleEnv({ dsh_session_id: 'x', 'DSH-X': 'x', '9X': 'x' });
+expect(Object.keys(sanBadKey.accepted).length === 0 && sanBadKey.warnings.length === 3,
+  `P3b 小写 / 连字符 / 数字开头 的键名一律忽略并逐个告警（实际 ${sanBadKey.warnings.length} 条）`);
+const sanBadVal = oracleMod.sanitizeOracleEnv({ A: undefined, B: null, C: 1, D: {} });
+expect(Object.keys(sanBadVal.accepted).length === 0 && sanBadVal.warnings.length === 4,
+  `P3b 值不是 string（undefined/null/数字/对象）一律忽略并告警，不做 String() 强转（实际 ${sanBadVal.warnings.length} 条）`);
+const sanPwd = oracleMod.sanitizeOracleEnv({ PWD: '/wrong' });
+expect(sanPwd.accepted.PWD === undefined && sanPwd.warnings.some((w) => w.includes('PWD')),
+  'P3b PWD 不可被 opts.env 覆盖（真实 cwd 永远优先）并告警');
+const sanMix = oracleMod.sanitizeOracleEnv({ DSH_SESSION_ID: 'sess-1', bad: 'x', ALSO_OK: 'y' });
+expect(sanMix.accepted.DSH_SESSION_ID === 'sess-1' && sanMix.accepted.ALSO_OK === 'y' && sanMix.warnings.length === 1,
+  'P3b 合法 + 非法混投 → 合法的进、非法的忽略并只告警那一条（不是一票否决）');
+const envOverride = oracleMod.oracleEnv('/tmp/the-cwd', { PATH: '/bin', LANG: 'en_US.UTF-8', PWD: '/wrong' }, { LANG: 'zh_CN.UTF-8', DSH_SESSION_ID: 'sess-1' });
+expect(envOverride.LANG === 'zh_CN.UTF-8' && envOverride.DSH_SESSION_ID === 'sess-1' && envOverride.PWD === '/tmp/the-cwd',
+  'P3b opts.env 覆盖同名白名单值；PWD 仍是真实 cwd');
+const rcEnv = await oracleMod.runOracle('node -e "process.stdout.write(String(process.env.DSH_SESSION_ID))"', { cwd: tmpCwd, ...quiet, env: { DSH_SESSION_ID: 'sess-abc' } });
+expect(rcEnv.ok === true && rcEnv.stdoutTail === 'sess-abc',
+  `P3b 子进程真的读到 DSH_SESSION_ID（实际 ${JSON.stringify(rcEnv.stdoutTail)}）`);
+const rcEnvBad = await oracleMod.runOracle('node -e "process.exit(0)"', { cwd: tmpCwd, ...quiet, env: { bad_key: 'x' } });
+expect(rcEnvBad.ok === true && rcEnvBad.envWarnings.length === 1,
+  'P3b 非法 opts.env 不改变判定结果，但 envWarnings 带回原因（忽略 ≠ 静默）');
+const rcEnvEmptyCmd = await oracleMod.runOracle('   ', { cwd: tmpCwd, env: { bad_key: 'x' } });
+expect(rcEnvEmptyCmd.ok === false && rcEnvEmptyCmd.envWarnings.length === 1,
+  'P3b 提前返回的路径（空命令）也带 envWarnings（最容易踩的情况不能恰好不告警）');
+const rcEnvLeak = await oracleMod.runOracle('node -e "process.exit(0)"', { cwd: tmpCwd, ...quiet, env: { DEEPSEEK_API_KEY: 'sk-leak' } });
+expect(rcEnvLeak.ok === true, 'P3b 合法键名即放行（opts.env 是显式出口，不是白名单绕过）');
+
+// 端到端：插件真的把**这次验收所属会话**交给命令，而不是只把 opts.env 做对。
+// 这条是 A（oracle 收 env）+ B（index.js 传 env）的合体断言：任一侧漏了都会红。
+const dEnv = mkdtempSync(join(tmpdir(), 'dsh-ledger-env-'));
+const cEnv = makeFakeCtx();
+mod.apply(cEnv, {
+  storageDir: dEnv,
+  gateOnStop: 'off',
+  verify: {
+    enabled: true,
+    timeoutMs: 20000,
+    commands: [{ id: 'echo-session', command: 'node -e "process.stdout.write(String(process.env.DSH_SESSION_ID))"' }],
+  },
+});
+const sEnv = { id: 'env-session-77', header: { cwd: tmpCwd }, snapshotEvents: () => [] };
+const eEnv = { agent: { session: sEnv, cwd: tmpCwd, steer: () => {}, inject: () => {} } };
+await cEnv._tools.get('ledger_open').execute({ requirements: ['验收要认得出是哪个会话'] }, eEnv);
+const vEnv = await cEnv._tools.get('ledger_verify').execute({ item: 'R1', command: 'echo-session' }, eEnv);
+expect(vEnv.includes('验收通过') && vEnv.includes('env-session-77'),
+  `P3b 端到端：ledger_verify 跑的命令读到 DSH_SESSION_ID=env-session-77（实际输出里 ${vEnv.includes('env-session-77') ? '有' : '没有'}）`);
+
 // 纯决策函数
 const fakeLedger = {
   items: [
