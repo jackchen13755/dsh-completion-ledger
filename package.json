@@ -23,7 +23,8 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "heal": "bash scripts/heal-env.sh",
-    "postinstall": "bash scripts/heal-env.sh"
+    "postinstall": "bash scripts/heal-env.sh",
+    "test": "node --test test/"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.14"

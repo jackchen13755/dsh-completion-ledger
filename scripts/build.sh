@@ -35,7 +35,12 @@ for p in "@deepseek-ai/dsh-tools" "@deepseek-ai/dsh-llm" "@deepseek-ai/schemaste
 done
 [ "$missing" = "0" ] || exit 1
 
-echo "=== 3) 账本目录可写 ==="
+echo "=== 3) 行为用例（node --test test/）==="
+# 只跑 smoke 不够：smoke 对 M1/M3/M6 只有「工具在册」的库存断言，行为断言都在 test/。
+# 把 test 挂进 check，交付自检才真的覆盖 receipt / pin / close 的判定。
+"$NODE" --test "$ROOT/test/" 2>&1 | tail -8
+
+echo "=== 4) 账本目录可写 ==="
 LEDGER_DIR="${DSH_HOME:-$HOME/.dsh}/completion-ledger"
 mkdir -p "$LEDGER_DIR" && echo "  ✓ $LEDGER_DIR"
 

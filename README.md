@@ -152,10 +152,13 @@
 | 工具 | 作用 |
 |---|---|
 | `ledger_open` | 登记任务简报 / 要求 / 约束（可多次调用追加） |
-| `ledger_evidence` | 给某条挂证据：`kind` = command / test / file / browser / url / manual；返回里会说明这条证据**有没有被观察到的动作支撑** |
+| `ledger_evidence` | 给某条挂证据：`kind` = command / test / file / browser / url / manual（**枚举，闭集**；`receipt` / `oracle` 是插件保留值，自报会被拒）；返回里会说明这条证据**有没有被观察到的动作支撑** |
 | `ledger_status` | 看全量账本 + 最近工具活动（优先落盘活动，跨重启可核验）+ 上次核验结论 + 疑似自报证据 |
 | `ledger_check` | 完成核验 → `complete` / `incomplete` / `empty`，附缺口、未被支撑的证据与警告；标出事实来源（重放/落盘/内存） |
 | `ledger_verify` | **仅 `verify.enabled=true` 时注册**：由插件自己执行验收命令（只认退出码 0），把结果作为客观证据挂到条目上；不通过就带回输出尾部要求继续修。命令只能引用 `verify.commands` 里声明的 id |
+| `ledger_receipt` | **默认关闭（`receipt.enabled`）**：由插件自己跑一条按条目登记的临时命令，把回执 `{cmd, exitCode, durationMs, at, mode, …}` 作为**客观证据**（`pluginRun: true`）挂到条目上，`verified` 恒为 boolean。`mode=pair` = 闸门必须能红一次：**基线必须达期望码、变异必须达非期望码且真的跑完**（127/126/超时/被杀不算红）。关闭时只返回一句「怎么开启」，不跑命令、不写证据 |
+| `ledger_pin` | 钉住/解除**主矛盾**（同一时刻最多一条未解除）：`pin` / `resolve`（要写 resolution）/ `unpin`（必须给 reason）。未解除期间 `ledger_check` **不得**返回 complete |
+| `ledger_close` | 写下**终态**：`achieved`（先跑核验，非 complete 则拒绝并列缺口）/ `dropped`（放弃，**每个未达成条目**都要 why，含被客观证据打回的）。终态写入后 evidence / receipt / pin / open 一律拒绝，`ledger_status` 与 `ledger_check` 都会显示终态 |
 
 ## 配置（profile patch 里按 id `completion-ledger` 覆盖）
 
@@ -178,7 +181,13 @@
     replayFromSessionLog: true # 从持久会话日志重放工具活动（晚装/重启/分叉后仍可核验）
     gitEvidence: true          # 文件类证据走只读 git 取证（存在性 + 是否被跟踪）
     reportFile: ''             # 非空则每次核验把交付报告写到会话工作目录（如 ledger-report.md）
-    verify:                    # 验收命令（Oracle）：默认全关，不开就不注册第 5 个工具、不跑子进程
+    receipt:                   # 证据收据（ledger_receipt）：**默认关闭**；关闭时工具仍注册、只回拒绝、不跑子进程
+      enabled: false           # 开启 = 允许模型按条目登记的命令由插件进程执行（绕过 bash 工具的审批与 workspace-write 沙箱）
+      timeoutMs: 120000
+      cwdScope: workspace      # workspace（默认）= 执行目录必须落在会话 cwd 内，证明不了就拒跑；any = 自行承担风险
+      tailChars: 0             # stdout/stderr 尾部保留多少字符到 receipts.jsonl；0 = 不留（默认）
+    verify:                    # 验收命令（Oracle）：默认全关，不开就不注册 ledger_verify（默认 7 个工具里的第 8 个）
+
       enabled: false
       commands: []             # [{ id: 'test', command: 'pnpm test' }] —— 只能引用这里的 id
       defaultCommands: []      # 宿主级强制闸门：条目没写 verify 时逐个套用（id 必须在 commands 里，否则丢弃 + warn 一次）
@@ -191,6 +200,17 @@
 
 一键严格档：仓库里的 [`strict.patch.yml`](./strict.patch.yml)（照 `dsh-doublecheck` 的 strict 预设做法）
 把 `strictEvidence` + `reportFile` + 收尾门禁一起打开，粘进 profile 的 `cordis.patch.yml` 即可。
+它**不开** `receipt`——严格档讲的是「证据要硬」，而 `receipt` 开的是「插件替模型执行命令」这个口子，
+两者不是一回事，要开请在配置里显式写。
+
+### 升级说明：receipt 证据只认 `pluginRun` 标记
+
+客观证据的判定从「`kind === 'receipt'`」改成了「证据里带插件私有标记 `pluginRun: true`」（`oracle: true` 同理），
+因为 `kind` 是 `ledger_evidence` 的自由字符串，模型可以自己写一条 `kind:'receipt'` 来冒充插件执行的收据。
+
+**行为变更（安全方向）**：旧账本里由早前版本写下的 `kind:'receipt'` 证据**没有** `pluginRun` 标记，
+升级后它们会被当成普通自报证据重新参与动作比对——于是原本被判为 complete 的会话可能变成 incomplete
+（拿不出对应动作的收据会被标为未被支撑）。这是刻意的：宁可让旧账本变严，也不要留一条能被自报洗白的路。
 
 ## 宿主兼容策略（`lib/compat/`）
 

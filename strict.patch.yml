@@ -20,6 +20,14 @@
 #
 # 注意：patch 会**替换该行的整份 config**，Schema 默认值不会重新补齐——
 # 所以只改这两个键时，其余键仍是各自的默认值（本插件所有键都有 default，无需重述）。
+#
+# 关于 receipt（证据收据，见 docs 与 ledger_receipt 的 description）：
+#   本预设**不**开启它。`receipt.enabled` 默认 false，因为该工具由插件进程直接 exec，
+#   绕过 bash 工具的审批与 workspace-write 沙箱，跑的又是模型按条目临时给的命令。
+#   要开启就自己加一段（其余键会补默认）：
+#     receipt:
+#       enabled: true
+#       # timeoutMs: 120000
 - id: completion-ledger
   config:
     strictEvidence: true

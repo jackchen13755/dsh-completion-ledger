@@ -183,7 +183,13 @@ const post = ctx._hooks.get('tools/post-execute')[0];
 const pre = ctx._hooks.get('agent/pre-step')[0];
 const stop = ctx._hooks.get('agent/turn-stopping')[0];
 
-expect(T.size === 4, `注册 4 个工具（实际 ${T.size}）`);
+// 工具清单是**库存断言**：M1/M3/M6 落地时新增了 ledger_receipt / ledger_pin / ledger_close
+// （三者无条件注册，与 verify.enabled 无关），所以 4 → 7。数字变了要在这里显式改，
+// 不能删掉这条断言——它挡的是「某个工具被静默摘注册」。
+expect(T.size === 7, `注册 7 个工具（实际 ${T.size}）`);
+for (const n of ['ledger_open', 'ledger_evidence', 'ledger_status', 'ledger_check', 'ledger_receipt', 'ledger_pin', 'ledger_close']) {
+  expect(T.has(n), `已注册 ${n}`);
+}
 const opened = await T.get('ledger_open').execute({ requirements: ['要求一'], constraints: ['不改范围外文件'] }, exec);
 expect(opened.includes('已登记 2 条'), 'ledger_open 登记 2 条契约');
 
@@ -750,7 +756,7 @@ mod.apply(c12, {
     ],
   },
 });
-expect(c12._tools.size === 5 && c12._tools.has('ledger_verify'), `P3 verify.enabled=true → 注册第五个工具（实际 ${c12._tools.size} 个）`);
+expect(c12._tools.size === 8 && c12._tools.has('ledger_verify'), `P3 verify.enabled=true → 再注册第五个工具（实际 ${c12._tools.size} 个）`);
 const s12 = { id: 'p3-1', header: { cwd: tmpCwd }, snapshotEvents: () => [] };
 const steered12 = [];
 const agent12 = { session: s12, cwd: tmpCwd, steer: (m) => steered12.push(m), inject: () => {} };
